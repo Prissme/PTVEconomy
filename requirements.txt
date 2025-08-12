@@ -1,4 +1,4 @@
-# Discord Bot Dependencies
+# Discord Bot Dependencies.
 discord.py==2.5.2
 
 # Database
