@@ -1,51 +1,61 @@
-import asyncpg
-from datetime import datetime
-from typing import Optional
+import discord
+from discord.ext import commands
+from datetime import datetime, timezone
+import random
+import os
+from dotenv import load_dotenv
+import db  # ton fichier db.py
 
-class Database:
-    def __init__(self, dsn: str):
-        self.dsn = dsn
-        self.pool: Optional[asyncpg.Pool] = None
+load_dotenv()
 
-    async def connect(self):
-        self.pool = await asyncpg.create_pool(dsn=self.dsn)
+TOKEN = os.getenv("DISCORD_TOKEN")
+OWNER_ID = int(os.getenv("OWNER_ID"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
-    async def get_balance(self, user_id: int) -> int:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
-            return row["balance"] if row else 0
+intents = discord.Intents.default()
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-    async def update_balance(self, user_id: int, amount: int):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO users (user_id, balance)
-                VALUES ($1, $2)
-                ON CONFLICT (user_id) DO UPDATE SET balance = users.balance + EXCLUDED.balance
-            """, user_id, amount)
+database = db.Database(dsn=DATABASE_URL)
 
-    async def transfer(self, giver_id: int, receiver_id: int, amount: int) -> bool:
-        async with self.pool.acquire() as conn:
-            async with conn.transaction():
-                giver = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", giver_id)
-                if not giver or giver["balance"] < amount:
-                    return False
-                await conn.execute("UPDATE users SET balance = balance - $1 WHERE user_id = $2", amount, giver_id)
-                await conn.execute("""
-                    INSERT INTO users (user_id, balance)
-                    VALUES ($1, $2)
-                    ON CONFLICT (user_id) DO UPDATE SET balance = users.balance + EXCLUDED.balance
-                """, receiver_id, amount)
-                return True
+@bot.event
+async def on_ready():
+    print(f"✅ Connecté en tant que {bot.user}")
+    await database.connect()
 
-    async def get_last_daily(self, user_id: int) -> Optional[datetime]:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT last_daily FROM users WHERE user_id = $1", user_id)
-            return row["last_daily"] if row else None
+@bot.command(name='balance')
+async def balance_cmd(ctx):
+    user_id = ctx.author.id
+    bal = await database.get_balance(user_id)
+    await ctx.send(f"{ctx.author.mention}, ton solde est de {bal} pièces.")
 
-    async def set_last_daily(self, user_id: int, timestamp: datetime):
-        async with self.pool.acquire() as conn:
-            await conn.execute("""
-                INSERT INTO users (user_id, last_daily)
-                VALUES ($1, $2)
-                ON CONFLICT (user_id) DO UPDATE SET last_daily = EXCLUDED.last_daily
-            """, user_id, timestamp)
+@bot.command(name='give')
+async def give_cmd(ctx, member: discord.Member, amount: int):
+    giver_id = ctx.author.id
+    receiver_id = member.id
+    if amount <= 0:
+        await ctx.send("Le montant doit être positif.")
+        return
+    success = await database.transfer(giver_id, receiver_id, amount)
+    if success:
+        await ctx.send(f"{ctx.author.mention} a donné {amount} pièces à {member.mention}.")
+    else:
+        await ctx.send("Tu n'as pas assez de pièces.")
+
+@bot.command(name='dailyspin')
+async def dailyspin_cmd(ctx):
+    user_id = ctx.author.id
+    now = datetime.now(timezone.utc)  # datetime aware UTC
+
+    last_daily = await database.get_last_daily(user_id)
+    if last_daily:
+        delta = now - last_daily
+        if delta.total_seconds() < 86400:
+            await ctx.send("Tu as déjà fait ton spin quotidien aujourd'hui. Réessaie plus tard !")
+            return
+
+    reward = random.randint(10, 100)
+    await database.update_balance(user_id, reward)
+    await database.set_last_daily(user_id, now)
+    await ctx.send(f"🎉 {ctx.author.mention}, tu as gagné {reward} pièces avec ton spin quotidien !")
+
+bot.run(TOKEN)
