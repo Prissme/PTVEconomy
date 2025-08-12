@@ -665,4 +665,32 @@ async def on_disconnect():
     logger.info("Bot déconnecté")
 
 async def shutdown():
-    """Fonction de fermeture propre
+    """Fonction de fermeture propre"""
+    logger.info("Arrêt du bot en cours...")
+    await close_pool()
+    await bot.close()
+
+if __name__ == "__main__":
+    if not TOKEN:
+        print("❌ TOKEN Discord manquant dans le fichier .env")
+        exit(1)
+    if not DATABASE_URL:
+        print("❌ DATABASE_URL manquante dans le fichier .env")
+        exit(1)
+        
+    try:
+        bot.run(TOKEN)
+    except KeyboardInterrupt:
+        print("\n🛑 Arrêt du bot demandé...")
+    except Exception as e:
+        logger.error(f"Erreur critique: {e}")
+    finally:
+        # Fermeture propre
+        try:
+            # Essayer de fermer le pool s'il existe encore
+            if db_pool and not db_pool._closed:
+                asyncio.get_event_loop().run_until_complete(close_pool())
+        except Exception as e:
+            logger.error(f"Erreur fermeture finale: {e}")
+        
+        print("🔴 Bot arrêté")
