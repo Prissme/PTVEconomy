@@ -35,7 +35,7 @@ async def init_database():
             DATABASE_URL, 
             min_size=1, 
             max_size=10,
-            command_timeout=60,  # Augmenté pour éviter les timeouts
+            command_timeout=60,
             server_settings={
                 'application_name': 'PrissBucks_Bot',
                 'timezone': 'UTC'
@@ -174,6 +174,27 @@ async def set_balance(user_id, amount):
         logger.error(f"Erreur set_balance pour user {user_id}, amount {amount}: {e}")
         return False
 
+def ensure_timezone_aware(dt):
+    """S'assure qu'un datetime est timezone-aware et en UTC"""
+    if dt is None:
+        return None
+    
+    # Si c'est déjà un datetime
+    if isinstance(dt, datetime):
+        if dt.tzinfo is None:
+            # Naive datetime, on assume UTC
+            return dt.replace(tzinfo=timezone.utc)
+        elif dt.tzinfo != timezone.utc:
+            # Convertir en UTC
+            return dt.astimezone(timezone.utc)
+        else:
+            # Déjà en UTC
+            return dt
+    
+    # Si c'est autre chose (ne devrait pas arriver), retourner None
+    logger.warning(f"Type de données inattendu pour datetime: {type(dt)} - {dt}")
+    return None
+
 async def get_daily_cooldown(user_id):
     """Récupère le cooldown daily d'un utilisateur avec retry"""
     if not db_pool:
@@ -184,7 +205,7 @@ async def get_daily_cooldown(user_id):
         try:
             async with db_pool.acquire() as conn:
                 result = await conn.fetchval('SELECT last_claim FROM daily_cooldowns WHERE user_id = $1', user_id)
-                return result
+                return ensure_timezone_aware(result)
         except Exception as e:
             logger.error(f"Erreur get_daily_cooldown pour user {user_id} (tentative {attempt + 1}): {e}")
             if attempt < max_retries - 1:
@@ -217,7 +238,7 @@ async def get_message_cooldown(user_id):
     try:
         async with db_pool.acquire() as conn:
             result = await conn.fetchval('SELECT last_message FROM message_cooldowns WHERE user_id = $1', user_id)
-            return result
+            return ensure_timezone_aware(result)
     except Exception as e:
         logger.error(f"Erreur get_message_cooldown pour user {user_id}: {e}")
         return None
@@ -288,21 +309,15 @@ async def balance(ctx, member: discord.Member = None):
 
 @bot.command(name="daily")
 async def daily(ctx):
-    """Récompense quotidienne - VERSION CORRIGÉE"""
+    """Récompense quotidienne - VERSION DÉFINITIVEMENT CORRIGÉE"""
     try:
         user_id = ctx.author.id
         now = datetime.now(timezone.utc)
         
-        # Vérifier le cooldown
+        # Vérifier le cooldown avec la fonction sécurisée
         last_claim = await get_daily_cooldown(user_id)
 
         if last_claim:
-            # S'assurer que last_claim est en UTC
-            if last_claim.tzinfo is None:
-                last_claim = last_claim.replace(tzinfo=timezone.utc)
-            elif last_claim.tzinfo != timezone.utc:
-                last_claim = last_claim.astimezone(timezone.utc)
-                
             time_diff = now - last_claim
             if time_diff < timedelta(hours=24):
                 remaining = timedelta(hours=24) - time_diff
@@ -330,18 +345,15 @@ async def daily(ctx):
                         )
                         
                         if last_claim_check:
-                            if last_claim_check.tzinfo is None:
-                                last_claim_check = last_claim_check.replace(tzinfo=timezone.utc)
-                            elif last_claim_check.tzinfo != timezone.utc:
-                                last_claim_check = last_claim_check.astimezone(timezone.utc)
-                            
-                            time_diff = now - last_claim_check
-                            if time_diff < timedelta(hours=24):
-                                remaining = timedelta(hours=24) - time_diff
-                                heures = remaining.seconds // 3600
-                                minutes = (remaining.seconds % 3600) // 60
-                                await ctx.send(f"{ctx.author.mention}, tu as déjà récupéré ta récompense quotidienne. Reviens dans **{heures}h{minutes:02d}m** ⏳")
-                                return
+                            last_claim_check = ensure_timezone_aware(last_claim_check)
+                            if last_claim_check:
+                                time_diff = now - last_claim_check
+                                if time_diff < timedelta(hours=24):
+                                    remaining = timedelta(hours=24) - time_diff
+                                    heures = remaining.seconds // 3600
+                                    minutes = (remaining.seconds % 3600) // 60
+                                    await ctx.send(f"{ctx.author.mention}, tu as déjà récupéré ta récompense quotidienne. Reviens dans **{heures}h{minutes:02d}m** ⏳")
+                                    return
                         
                         # Mettre à jour la balance
                         await conn.execute('''
@@ -686,15 +698,12 @@ async def on_message(message):
                     user_id
                 )
 
-                # Vérifier le cooldown (20 secondes)
+                # Vérifier le cooldown (20 secondes) avec timezone-aware
                 cooldown_expired = True
                 if last_message_time:
-                    if last_message_time.tzinfo is None:
-                        last_message_time = last_message_time.replace(tzinfo=timezone.utc)
-                    elif last_message_time.tzinfo != timezone.utc:
-                        last_message_time = last_message_time.astimezone(timezone.utc)
-                    
-                    cooldown_expired = (now - last_message_time) >= timedelta(seconds=20)
+                    last_message_time = ensure_timezone_aware(last_message_time)
+                    if last_message_time:
+                        cooldown_expired = (now - last_message_time) >= timedelta(seconds=20)
 
                 # Si le cooldown est expiré, donner 1 PrissBuck et mettre à jour
                 if cooldown_expired:
@@ -783,7 +792,6 @@ async def shutdown():
     await close_pool()
     await bot.close()
 
-# Ajout de nouvelles commandes utiles
 @bot.command(name="stats")
 async def stats(ctx, member: discord.Member = None):
     """Affiche les statistiques détaillées d'un utilisateur"""
@@ -816,16 +824,18 @@ async def stats(ctx, member: discord.Member = None):
         embed.add_field(name="💰 Balance", value=f"**{balance:,} PrissBucks**", inline=True)
         embed.add_field(name="🏆 Rang", value=f"**#{rank:,}**", inline=True)
         
-        # Info sur le daily
+        # Info sur le daily avec timezone-aware
         if last_daily:
-            if last_daily.tzinfo is None:
-                last_daily = last_daily.replace(tzinfo=timezone.utc)
-            time_since_daily = datetime.now(timezone.utc) - last_daily
-            if time_since_daily < timedelta(hours=24):
-                remaining = timedelta(hours=24) - time_since_daily
-                heures = remaining.seconds // 3600
-                minutes = (remaining.seconds % 3600) // 60
-                daily_status = f"⏳ {heures}h{minutes:02d}m restantes"
+            last_daily = ensure_timezone_aware(last_daily)
+            if last_daily:
+                time_since_daily = datetime.now(timezone.utc) - last_daily
+                if time_since_daily < timedelta(hours=24):
+                    remaining = timedelta(hours=24) - time_since_daily
+                    heures = remaining.seconds // 3600
+                    minutes = (remaining.seconds % 3600) // 60
+                    daily_status = f"⏳ {heures}h{minutes:02d}m restantes"
+                else:
+                    daily_status = "✅ Disponible"
             else:
                 daily_status = "✅ Disponible"
         else:
@@ -833,14 +843,16 @@ async def stats(ctx, member: discord.Member = None):
         
         embed.add_field(name="📅 Daily", value=daily_status, inline=False)
         
-        # Info sur le dernier message
+        # Info sur le dernier message avec timezone-aware
         if last_message:
-            if last_message.tzinfo is None:
-                last_message = last_message.replace(tzinfo=timezone.utc)
-            time_since_msg = datetime.now(timezone.utc) - last_message
-            if time_since_msg < timedelta(seconds=20):
-                remaining_seconds = 20 - time_since_msg.seconds
-                msg_status = f"⏳ {remaining_seconds}s restantes"
+            last_message = ensure_timezone_aware(last_message)
+            if last_message:
+                time_since_msg = datetime.now(timezone.utc) - last_message
+                if time_since_msg < timedelta(seconds=20):
+                    remaining_seconds = 20 - time_since_msg.seconds
+                    msg_status = f"⏳ {remaining_seconds}s restantes"
+                else:
+                    msg_status = "✅ Disponible"
             else:
                 msg_status = "✅ Disponible"
         else:
