@@ -386,10 +386,11 @@ async def debug(ctx):
             my_balance = await conn.fetchval('SELECT balance FROM balances WHERE user_id = $1', OWNER_ID) or 0
             
             # Dernières activités
+            cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
             recent_daily = await conn.fetchval('''
                 SELECT COUNT(*) FROM daily_cooldowns 
-                WHERE last_claim > $1
-            ''', datetime.now(timezone.utc) - timedelta(hours=24)) or 0
+                WHERE last_claim > $1::timestamptz
+            ''', cutoff_time) or 0
             
             embed = discord.Embed(title="🔧 Debug Info", color=0x00ff00)
             embed.add_field(name="🔗 Connexion DB", value="✅ OK" if test == 1 else "❌ Erreur", inline=True)
@@ -439,6 +440,30 @@ async def set_money(ctx, member: discord.Member, amount: int):
             await ctx.send("❌ Erreur lors de la modification du solde.")
     except Exception as e:
         logger.error(f"Erreur set_money: {e}")
+        await ctx.send(f"❌ Erreur: {e}")
+
+@bot.command(name="clean_db")
+async def clean_db(ctx):
+    """Nettoie la base de données (owner seulement)"""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send("❌ Cette commande est réservée au propriétaire.")
+        return
+    
+    try:
+        if not db_pool:
+            await ctx.send("❌ Pool de base de données non initialisé")
+            return
+        
+        async with db_pool.acquire() as conn:
+            # Supprimer les entrées avec des timestamps problématiques
+            deleted_daily = await conn.fetchval('DELETE FROM daily_cooldowns WHERE last_claim IS NULL RETURNING count(*)')
+            deleted_msg = await conn.fetchval('DELETE FROM message_cooldowns WHERE last_message IS NULL RETURNING count(*)')
+            deleted_balance = await conn.fetchval('DELETE FROM balances WHERE balance IS NULL RETURNING count(*)')
+            
+        await ctx.send(f"✅ Nettoyage terminé:\n- {deleted_daily or 0} daily supprimés\n- {deleted_msg or 0} message cooldowns supprimés\n- {deleted_balance or 0} balances supprimées")
+            
+    except Exception as e:
+        logger.error(f"Erreur clean_db: {e}")
         await ctx.send(f"❌ Erreur: {e}")
 
 @bot.event
