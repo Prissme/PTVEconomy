@@ -177,8 +177,8 @@ async def set_daily_cooldown(user_id):
         async with db_pool.acquire() as conn:
             now = datetime.now(timezone.utc)
             await conn.execute('''
-                INSERT INTO daily_cooldowns (user_id, last_claim) VALUES ($1, $2)
-                ON CONFLICT (user_id) DO UPDATE SET last_claim = $2
+                INSERT INTO daily_cooldowns (user_id, last_claim) VALUES ($1, $2::timestamptz)
+                ON CONFLICT (user_id) DO UPDATE SET last_claim = $2::timestamptz
             ''', user_id, now)
         return True
     except Exception as e:
@@ -207,8 +207,8 @@ async def set_message_cooldown(user_id):
         async with db_pool.acquire() as conn:
             now = datetime.now(timezone.utc)
             await conn.execute('''
-                INSERT INTO message_cooldowns (user_id, last_message) VALUES ($1, $2)
-                ON CONFLICT (user_id) DO UPDATE SET last_message = $2
+                INSERT INTO message_cooldowns (user_id, last_message) VALUES ($1, $2::timestamptz)
+                ON CONFLICT (user_id) DO UPDATE SET last_message = $2::timestamptz
             ''', user_id, now)
         return True
     except Exception as e:
@@ -273,10 +273,10 @@ async def daily(ctx):
         last_claim = await get_daily_cooldown(user_id)
 
         if last_claim:
-            # S'assurer que last_claim a la bonne timezone
+            # Convertir en UTC si nécessaire
             if last_claim.tzinfo is None:
                 last_claim = last_claim.replace(tzinfo=timezone.utc)
-            elif last_claim.tzinfo != timezone.utc:
+            else:
                 last_claim = last_claim.astimezone(timezone.utc)
                 
             time_diff = now - last_claim
@@ -305,10 +305,10 @@ async def daily(ctx):
                         updated_at = $3
                     ''', user_id, gain, now)
                     
-                    # Définir le cooldown
+                    # Définir le cooldown avec timezone explicite
                     await conn.execute('''
-                        INSERT INTO daily_cooldowns (user_id, last_claim) VALUES ($1, $2)
-                        ON CONFLICT (user_id) DO UPDATE SET last_claim = $2
+                        INSERT INTO daily_cooldowns (user_id, last_claim) VALUES ($1, $2::timestamptz)
+                        ON CONFLICT (user_id) DO UPDATE SET last_claim = $2::timestamptz
                     ''', user_id, now)
                     
                     # Récupérer la nouvelle balance
@@ -472,11 +472,11 @@ async def debug(ctx):
             # Ta balance
             my_balance = await conn.fetchval('SELECT balance FROM balances WHERE user_id = $1', OWNER_ID) or 0
             
-            # Dernières activités
+            # Dernières activités (24h)
             cutoff_time = datetime.now(timezone.utc) - timedelta(hours=24)
             recent_daily = await conn.fetchval('''
                 SELECT COUNT(*) FROM daily_cooldowns 
-                WHERE last_claim > $1
+                WHERE last_claim > $1::timestamptz
             ''', cutoff_time) or 0
             
             embed = discord.Embed(title="🔧 Debug Info", color=0x00ff00)
@@ -621,8 +621,8 @@ async def on_message(message):
                         ''', user_id, now)
                         
                         await conn.execute('''
-                            INSERT INTO message_cooldowns (user_id, last_message) VALUES ($1, $2)
-                            ON CONFLICT (user_id) DO UPDATE SET last_message = $2
+                            INSERT INTO message_cooldowns (user_id, last_message) VALUES ($1, $2::timestamptz)
+                            ON CONFLICT (user_id) DO UPDATE SET last_message = $2::timestamptz
                         ''', user_id, now)
                         
             except Exception as e:
