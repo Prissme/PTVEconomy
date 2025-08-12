@@ -8,7 +8,7 @@ from datetime import datetime, timezone, timedelta
 import random
 
 # Import des fonctions DB
-import database as db
+import db
 
 # ------------------- CONFIG LOGS -------------------
 logging.basicConfig(
