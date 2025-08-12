@@ -128,6 +128,27 @@ async def classement(interaction: discord.Interaction):
     embed = discord.Embed(title="🏆 Classement des PrissBucks", description=description, color=0xFFD700)
     await interaction.response.send_message(embed=embed)
 
+@bot.event
+async def on_message(message):
+    # Ignorer les messages du bot lui-même
+    if message.author.bot:
+        return
+    
+    user_id = message.author.id
+    now = datetime.utcnow()
+
+    last_message_time = get_cooldown(user_id)
+
+    # Si cooldown actif et moins de 20 secondes depuis dernier message, ne rien faire
+    if last_message_time and (now - last_message_time) < timedelta(seconds=20):
+        pass
+    else:
+        update_balance(user_id, 1)  # +1 PrissBuck
+        set_cooldown(user_id)
+
+    # Pour que les commandes fonctionnent toujours !
+    await bot.process_commands(message)
+
 if __name__ == "__main__":
     if not TOKEN:
         raise RuntimeError("DISCORD_TOKEN not set in environment")
