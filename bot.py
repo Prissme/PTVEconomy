@@ -37,7 +37,7 @@ async def give_cmd(ctx, member: discord.Member, amount: int):
         return
     success = await database.transfer(giver_id, receiver_id, amount)
     if success:
-        await ctx.send(f"{ctx.author.mention} a donné {amount} PrissBucks à {member.mention}.")
+        await ctx.send(f"{ctx.author.mention} a donné {amount} pièces à {member.mention}.")
     else:
         await ctx.send("Tu n'as pas assez de pièces.")
 
