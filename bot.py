@@ -24,14 +24,13 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Pool de connexions à la base de données
 db_pool = None
-db_ready = False
 
 async def init_database():
     """Initialise la base de données et crée les tables"""
-    global db_pool, db_ready
+    global db_pool
     
     try:
-        db_pool = await asyncpg.create_pool(DATABASE_URL)
+        db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
         logger.info("Pool de connexions créé avec succès")
         
         async with db_pool.acquire() as conn:
@@ -68,17 +67,15 @@ async def init_database():
             
             logger.info("Tables créées/vérifiées avec succès")
         
-        db_ready = True
+        return True
         
     except Exception as e:
         logger.error(f"Erreur lors de l'initialisation de la base de données: {e}")
-        db_ready = False
-        raise
+        return False
 
 async def get_balance(user_id):
     """Récupère le solde d'un utilisateur"""
-    if not db_ready:
-        logger.error("Base de données non prête")
+    if not db_pool:
         return 0
         
     try:
@@ -91,34 +88,52 @@ async def get_balance(user_id):
 
 async def update_balance(user_id, amount):
     """Met à jour le solde d'un utilisateur"""
-    if not db_ready:
-        logger.error("Base de données non prête")
+    if not db_pool:
         return False
         
     try:
         async with db_pool.acquire() as conn:
-            # Utiliser une transaction pour assurer la cohérence
-            async with conn.transaction():
-                await conn.execute('''
-                    INSERT INTO balances (user_id, balance, updated_at) VALUES ($1, $2, $3)
-                    ON CONFLICT (user_id) DO UPDATE SET 
-                    balance = balances.balance + $2,
-                    updated_at = $3
-                ''', user_id, amount, datetime.now(timezone.utc))
-                
-                # Empêcher les balances négatives
-                await conn.execute('''
-                    UPDATE balances SET balance = 0 
-                    WHERE user_id = $1 AND balance < 0
-                ''', user_id)
+            await conn.execute('''
+                INSERT INTO balances (user_id, balance, updated_at) VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO UPDATE SET 
+                balance = balances.balance + $2,
+                updated_at = $3
+            ''', user_id, amount, datetime.now(timezone.utc))
+            
+            # Empêcher les balances négatives (sauf pour les déductions légitimes)
+            if amount < 0:
+                # Vérifier que la balance ne devient pas négative
+                new_balance = await conn.fetchval('SELECT balance FROM balances WHERE user_id = $1', user_id)
+                if new_balance < 0:
+                    await conn.execute('UPDATE balances SET balance = 0 WHERE user_id = $1', user_id)
+                    return False  # Transaction échouée car solde insuffisant
+            
         return True
     except Exception as e:
         logger.error(f"Erreur update_balance pour user {user_id}, amount {amount}: {e}")
         return False
 
+async def set_balance(user_id, amount):
+    """Définit le solde exact d'un utilisateur"""
+    if not db_pool:
+        return False
+        
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                INSERT INTO balances (user_id, balance, updated_at) VALUES ($1, $2, $3)
+                ON CONFLICT (user_id) DO UPDATE SET 
+                balance = $2,
+                updated_at = $3
+            ''', user_id, max(0, amount), datetime.now(timezone.utc))
+        return True
+    except Exception as e:
+        logger.error(f"Erreur set_balance pour user {user_id}, amount {amount}: {e}")
+        return False
+
 async def get_daily_cooldown(user_id):
     """Récupère le cooldown daily d'un utilisateur"""
-    if not db_ready:
+    if not db_pool:
         return None
         
     try:
@@ -131,7 +146,7 @@ async def get_daily_cooldown(user_id):
 
 async def set_daily_cooldown(user_id):
     """Définit le cooldown daily d'un utilisateur"""
-    if not db_ready:
+    if not db_pool:
         return False
         
     try:
@@ -148,7 +163,7 @@ async def set_daily_cooldown(user_id):
 
 async def get_message_cooldown(user_id):
     """Récupère le cooldown message d'un utilisateur"""
-    if not db_ready:
+    if not db_pool:
         return None
         
     try:
@@ -161,7 +176,7 @@ async def get_message_cooldown(user_id):
 
 async def set_message_cooldown(user_id):
     """Définit le cooldown message d'un utilisateur"""
-    if not db_ready:
+    if not db_pool:
         return False
         
     try:
@@ -192,52 +207,73 @@ async def fetch_username(user_id):
 async def on_ready():
     print(f"🤖 Connecté en tant que {bot.user}")
     try:
-        await init_database()
-        await bot.tree.sync()
-        print("✅ Base de données initialisée et commandes synchronisées !")
+        success = await init_database()
+        if success:
+            await bot.tree.sync()
+            print("✅ Base de données initialisée et commandes synchronisées !")
+        else:
+            print("❌ Erreur lors de l'initialisation de la base de données")
     except Exception as e:
         print(f"❌ Erreur lors de l'initialisation: {e}")
 
 @bot.command(name="balance")
 async def balance(ctx, member: discord.Member = None):
     """Affiche le solde d'un utilisateur"""
-    target = member if member else ctx.author
-    bal = await get_balance(target.id)
-    
-    if target == ctx.author:
-        await ctx.send(f"{ctx.author.mention}, tu as **{bal} PrissBucks** 💵")
-    else:
-        await ctx.send(f"{target.mention} a **{bal} PrissBucks** 💵")
+    try:
+        target = member if member else ctx.author
+        bal = await get_balance(target.id)
+        
+        if target == ctx.author:
+            await ctx.send(f"{ctx.author.mention}, tu as **{bal:,} PrissBucks** 💵")
+        else:
+            await ctx.send(f"{target.mention} a **{bal:,} PrissBucks** 💵")
+    except Exception as e:
+        logger.error(f"Erreur commande balance: {e}")
+        await ctx.send("❌ Erreur lors de la récupération du solde.")
 
 @bot.command(name="daily")
 async def daily(ctx):
     """Récompense quotidienne"""
-    user_id = ctx.author.id
-    now = datetime.now(timezone.utc)
-    last_claim = await get_daily_cooldown(user_id)
+    try:
+        user_id = ctx.author.id
+        now = datetime.now(timezone.utc)
+        
+        # Vérifier le cooldown
+        last_claim = await get_daily_cooldown(user_id)
 
-    if last_claim and now - last_claim < timedelta(hours=24):
-        remaining = timedelta(hours=24) - (now - last_claim)
-        heures = remaining.seconds // 3600
-        minutes = (remaining.seconds % 3600) // 60
-        await ctx.send(f"{ctx.author.mention}, tu as déjà récupéré ta récompense quotidienne. Reviens dans **{heures}h{minutes}m** ⏳")
-        return
+        if last_claim:
+            time_diff = now - last_claim
+            if time_diff < timedelta(hours=24):
+                remaining = timedelta(hours=24) - time_diff
+                heures = remaining.seconds // 3600
+                minutes = (remaining.seconds % 3600) // 60
+                await ctx.send(f"{ctx.author.mention}, tu as déjà récupéré ta récompense quotidienne. Reviens dans **{heures}h{minutes:02d}m** ⏳")
+                return
 
-    gain = 50  # montant journalier
-    success = await update_balance(user_id, gain)
-    if success and await set_daily_cooldown(user_id):
-        await ctx.send(f"{ctx.author.mention}, tu as récupéré ta récompense quotidienne de **{gain} PrissBucks** 💵 !")
-    else:
-        await ctx.send(f"{ctx.author.mention}, erreur lors de la récupération de la récompense. Réessaye plus tard.")
+        # Donner la récompense
+        gain = 50
+        balance_success = await update_balance(user_id, gain)
+        cooldown_success = await set_daily_cooldown(user_id)
+        
+        if balance_success and cooldown_success:
+            new_balance = await get_balance(user_id)
+            await ctx.send(f"🎉 {ctx.author.mention}, tu as récupéré ta récompense quotidienne de **{gain} PrissBucks** 💵 !\n💰 Nouveau solde: **{new_balance:,} PrissBucks**")
+        else:
+            await ctx.send(f"❌ {ctx.author.mention}, erreur lors de la récupération de la récompense. Réessaye plus tard.")
+            logger.error(f"Erreur daily pour {user_id}: balance_success={balance_success}, cooldown_success={cooldown_success}")
+            
+    except Exception as e:
+        logger.error(f"Erreur commande daily: {e}")
+        await ctx.send("❌ Erreur lors de la récupération de la récompense.")
 
 @bot.tree.command(name="classement", description="Affiche le top 10 des détenteurs de PrissBucks 💵")
 async def classement(interaction: discord.Interaction):
     """Affiche le classement des utilisateurs"""
-    if not db_ready:
-        await interaction.response.send_message("❌ Base de données non disponible.", ephemeral=True)
-        return
-        
     try:
+        if not db_pool:
+            await interaction.response.send_message("❌ Base de données non disponible.", ephemeral=True)
+            return
+            
         async with db_pool.acquire() as conn:
             results = await conn.fetch('''
                 SELECT user_id, balance FROM balances 
@@ -277,42 +313,49 @@ async def classement(interaction: discord.Interaction):
 @app_commands.describe(member="Le membre qui reçoit", amount="Le montant à donner")
 async def give(interaction: discord.Interaction, member: discord.Member, amount: int):
     """Transférer des PrissBucks à un autre utilisateur"""
-    sender = interaction.user.id
-    receiver = member.id
-    
-    # Vérifications
-    if amount <= 0:
-        await interaction.response.send_message("❌ Le montant doit être positif.", ephemeral=True)
-        return
-    if sender == receiver:
-        await interaction.response.send_message("❌ Tu ne peux pas te donner des PrissBucks à toi-même.", ephemeral=True)
-        return
-    if member.bot:
-        await interaction.response.send_message("❌ Tu ne peux pas donner des PrissBucks à un bot.", ephemeral=True)
-        return
-
-    sender_bal = await get_balance(sender)
-    if sender_bal < amount:
-        await interaction.response.send_message(f"❌ Tu n'as que **{sender_bal} PrissBucks** 💵.", ephemeral=True)
-        return
-
-    # Calcul des montants
-    tax = max(1, int(amount * 0.02))  # taxe 2%, minimum 1
-    net_amount = amount - tax
-
     try:
-        # Effectuer les transactions
-        success1 = await update_balance(sender, -amount)
-        success2 = await update_balance(receiver, net_amount)
-        success3 = await update_balance(OWNER_ID, tax)
+        sender = interaction.user.id
+        receiver = member.id
         
-        if success1 and success2 and success3:
+        # Vérifications
+        if amount <= 0:
+            await interaction.response.send_message("❌ Le montant doit être positif.", ephemeral=True)
+            return
+        if sender == receiver:
+            await interaction.response.send_message("❌ Tu ne peux pas te donner des PrissBucks à toi-même.", ephemeral=True)
+            return
+        if member.bot:
+            await interaction.response.send_message("❌ Tu ne peux pas donner des PrissBucks à un bot.", ephemeral=True)
+            return
+
+        sender_bal = await get_balance(sender)
+        if sender_bal < amount:
+            await interaction.response.send_message(f"❌ Tu n'as que **{sender_bal:,} PrissBucks** 💵, tu ne peux pas donner **{amount:,}**.", ephemeral=True)
+            return
+
+        # Calcul des montants
+        tax = max(1, int(amount * 0.02))  # taxe 2%, minimum 1
+        net_amount = amount - tax
+
+        # Effectuer les transactions dans l'ordre correct
+        sender_success = await update_balance(sender, -amount)
+        if not sender_success:
+            await interaction.response.send_message("❌ Solde insuffisant pour effectuer cette transaction.", ephemeral=True)
+            return
+            
+        receiver_success = await update_balance(receiver, net_amount)
+        tax_success = await update_balance(OWNER_ID, tax)
+        
+        if receiver_success and tax_success:
             await interaction.response.send_message(
-                f"✅ {interaction.user.mention} a donné **{net_amount} PrissBucks** 💵 à {member.mention}\n"
-                f"💰 Taxe prélevée: **{tax} PrissBucks**"
+                f"✅ {interaction.user.mention} a donné **{net_amount:,} PrissBucks** 💵 à {member.mention}\n"
+                f"💰 Taxe prélevée: **{tax:,} PrissBucks**"
             )
         else:
-            await interaction.response.send_message("❌ Erreur lors de la transaction. Réessaye plus tard.", ephemeral=True)
+            # Annuler la transaction du sender en cas d'échec
+            await update_balance(sender, amount)
+            await interaction.response.send_message("❌ Erreur lors de la transaction. Transaction annulée.", ephemeral=True)
+            logger.error(f"Erreur give: receiver_success={receiver_success}, tax_success={tax_success}")
             
     except Exception as e:
         logger.error(f"Erreur give: {e}")
@@ -325,57 +368,83 @@ async def debug(ctx):
         await ctx.send("❌ Cette commande est réservée au propriétaire.")
         return
     
-    if not db_ready:
-        await ctx.send("❌ Base de données non prête")
-        return
-    
     try:
+        if not db_pool:
+            await ctx.send("❌ Pool de base de données non initialisé")
+            return
+        
         async with db_pool.acquire() as conn:
+            # Test de connexion
+            test = await conn.fetchval('SELECT 1')
+            
             # Statistiques générales
-            total_users = await conn.fetchval('SELECT COUNT(*) FROM balances')
-            total_money = await conn.fetchval('SELECT COALESCE(SUM(balance), 0) FROM balances')
-            active_users = await conn.fetchval('SELECT COUNT(*) FROM balances WHERE balance > 0')
+            total_users = await conn.fetchval('SELECT COUNT(*) FROM balances') or 0
+            total_money = await conn.fetchval('SELECT COALESCE(SUM(balance), 0) FROM balances') or 0
+            active_users = await conn.fetchval('SELECT COUNT(*) FROM balances WHERE balance > 0') or 0
             
             # Ta balance
-            my_balance = await conn.fetchval('SELECT balance FROM balances WHERE user_id = $1', OWNER_ID)
+            my_balance = await conn.fetchval('SELECT balance FROM balances WHERE user_id = $1', OWNER_ID) or 0
             
             # Dernières activités
-            recent_daily = await conn.fetchval('SELECT COUNT(*) FROM daily_cooldowns WHERE last_claim > $1', 
-                                            datetime.now(timezone.utc) - timedelta(hours=24))
+            recent_daily = await conn.fetchval('''
+                SELECT COUNT(*) FROM daily_cooldowns 
+                WHERE last_claim > $1
+            ''', datetime.now(timezone.utc) - timedelta(hours=24)) or 0
             
             embed = discord.Embed(title="🔧 Debug Info", color=0x00ff00)
-            embed.add_field(name="👥 Utilisateurs totaux", value=f"{total_users}", inline=True)
+            embed.add_field(name="🔗 Connexion DB", value="✅ OK" if test == 1 else "❌ Erreur", inline=True)
+            embed.add_field(name="👥 Utilisateurs totaux", value=f"{total_users:,}", inline=True)
             embed.add_field(name="💰 PrissBucks totaux", value=f"{total_money:,}", inline=True)
-            embed.add_field(name="✅ Utilisateurs actifs", value=f"{active_users}", inline=True)
-            embed.add_field(name="👑 Ta balance", value=f"{my_balance or 0:,}", inline=True)
-            embed.add_field(name="📅 Daily récentes (24h)", value=f"{recent_daily}", inline=True)
-            embed.add_field(name="🗄️ DB Status", value="✅ Connectée" if db_ready else "❌ Déconnectée", inline=True)
+            embed.add_field(name="✅ Utilisateurs actifs", value=f"{active_users:,}", inline=True)
+            embed.add_field(name="👑 Ta balance", value=f"{my_balance:,}", inline=True)
+            embed.add_field(name="📅 Daily récentes (24h)", value=f"{recent_daily:,}", inline=True)
+            embed.set_footer(text=f"Pool: {db_pool._con_count if hasattr(db_pool, '_con_count') else 'N/A'} connexions")
             
             await ctx.send(embed=embed)
             
     except Exception as e:
+        logger.error(f"Erreur debug: {e}")
         await ctx.send(f"❌ Erreur debug: {e}")
 
-@bot.command(name="reset_balance")
-async def reset_balance(ctx, member: discord.Member = None):
-    """Reset la balance d'un utilisateur (owner seulement)"""
+@bot.command(name="add_money")
+async def add_money(ctx, member: discord.Member, amount: int):
+    """Ajoute de l'argent à un utilisateur (owner seulement)"""
     if ctx.author.id != OWNER_ID:
         await ctx.send("❌ Cette commande est réservée au propriétaire.")
         return
         
-    target = member if member else ctx.author
-    
     try:
-        async with db_pool.acquire() as conn:
-            await conn.execute('UPDATE balances SET balance = 0 WHERE user_id = $1', target.id)
-        await ctx.send(f"✅ Balance de {target.mention} remise à zéro.")
+        success = await update_balance(member.id, amount)
+        if success:
+            new_balance = await get_balance(member.id)
+            await ctx.send(f"✅ **{amount:,} PrissBucks** ajoutés à {member.mention}. Nouveau solde: **{new_balance:,} PrissBucks**")
+        else:
+            await ctx.send("❌ Erreur lors de l'ajout de l'argent.")
     except Exception as e:
+        logger.error(f"Erreur add_money: {e}")
+        await ctx.send(f"❌ Erreur: {e}")
+
+@bot.command(name="set_money")
+async def set_money(ctx, member: discord.Member, amount: int):
+    """Définit le solde exact d'un utilisateur (owner seulement)"""
+    if ctx.author.id != OWNER_ID:
+        await ctx.send("❌ Cette commande est réservée au propriétaire.")
+        return
+        
+    try:
+        success = await set_balance(member.id, amount)
+        if success:
+            await ctx.send(f"✅ Solde de {member.mention} défini à **{amount:,} PrissBucks**")
+        else:
+            await ctx.send("❌ Erreur lors de la modification du solde.")
+    except Exception as e:
+        logger.error(f"Erreur set_money: {e}")
         await ctx.send(f"❌ Erreur: {e}")
 
 @bot.event
 async def on_message(message):
     # Ignorer les messages du bot lui-même
-    if message.author.bot or not db_ready:
+    if message.author.bot or not db_pool:
         await bot.process_commands(message)
         return
     
@@ -385,13 +454,13 @@ async def on_message(message):
     try:
         last_message_time = await get_message_cooldown(user_id)
 
-        # Si cooldown actif et moins de 20 secondes depuis dernier message, ne rien faire
+        # Si pas de cooldown ou cooldown expiré (20 secondes)
         if not last_message_time or (now - last_message_time) >= timedelta(seconds=20):
-            success1 = await update_balance(user_id, 1)  # +1 PrissBuck
-            success2 = await set_message_cooldown(user_id)
+            balance_success = await update_balance(user_id, 1)  # +1 PrissBuck
+            cooldown_success = await set_message_cooldown(user_id)
             
-            if not (success1 and success2):
-                logger.warning(f"Échec mise à jour pour message de {user_id}")
+            if not (balance_success and cooldown_success):
+                logger.warning(f"Échec mise à jour message pour {user_id}")
                 
     except Exception as e:
         logger.error(f"Erreur on_message pour user {user_id}: {e}")
@@ -405,19 +474,24 @@ async def on_command_error(ctx, error):
     if isinstance(error, commands.CommandNotFound):
         return
     elif isinstance(error, commands.MissingRequiredArgument):
-        await ctx.send(f"❌ Argument manquant: {error.param}")
+        await ctx.send(f"❌ Argument manquant: `{error.param}`")
     elif isinstance(error, commands.BadArgument):
-        await ctx.send("❌ Argument invalide.")
+        await ctx.send("❌ Argument invalide. Vérifie la syntaxe de la commande.")
+    elif isinstance(error, commands.CommandOnCooldown):
+        await ctx.send(f"❌ Commande en cooldown. Réessaye dans {error.retry_after:.1f}s")
     else:
         logger.error(f"Erreur commande {ctx.command}: {error}")
-        await ctx.send("❌ Une erreur est survenue.")
+        await ctx.send("❌ Une erreur inattendue est survenue.")
 
 # Gestionnaire de fermeture propre
-@bot.event
-async def on_disconnect():
+async def close_pool():
     if db_pool:
         await db_pool.close()
         logger.info("Pool de connexions fermé")
+
+@bot.event
+async def on_disconnect():
+    await close_pool()
 
 if __name__ == "__main__":
     if not TOKEN:
@@ -429,10 +503,18 @@ if __name__ == "__main__":
         
     try:
         bot.run(TOKEN)
+    except KeyboardInterrupt:
+        print("\n🛑 Arrêt du bot...")
     except Exception as e:
         logger.error(f"Erreur critique: {e}")
     finally:
-        if db_pool:
-            # Tentative de fermeture propre
-            import asyncio
-            asyncio.run(db_pool.close())
+        # Fermeture propre en cas d'arrêt
+        import asyncio
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_running():
+                loop.create_task(close_pool())
+            else:
+                asyncio.run(close_pool())
+        except Exception as e:
+            logger.error(f"Erreur fermeture: {e}")
