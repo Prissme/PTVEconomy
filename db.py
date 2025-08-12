@@ -9,6 +9,7 @@ db_pool: asyncpg.pool.Pool = None
 
 # ------------------- INIT DB -------------------
 async def init_database(DATABASE_URL: str):
+    """Initialise la connexion et crée les tables si elles n'existent pas."""
     global db_pool
     try:
         db_pool = await asyncpg.create_pool(
@@ -47,6 +48,7 @@ async def init_database(DATABASE_URL: str):
 
 # ------------------- BALANCE UTILS -------------------
 async def get_balance(user_id: int) -> int:
+    """Retourne la balance actuelle d'un joueur."""
     if not db_pool:
         return 0
     try:
@@ -59,7 +61,7 @@ async def get_balance(user_id: int) -> int:
 
 
 async def add_balance(user_id: int, amount: int) -> bool:
-    """Ajoute ou retire un montant à la balance."""
+    """Ajoute (ou retire si négatif) un montant à la balance."""
     if not db_pool:
         return False
     try:
