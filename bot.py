@@ -4,7 +4,7 @@ from discord import app_commands
 import os
 import asyncpg
 from dotenv import load_dotenv
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
@@ -19,6 +19,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 # Pool de connexions à la base de données
 db_pool = None
+db_ready = False
 
 async def init_database():
     """Initialise la base de données et crée les tables"""
