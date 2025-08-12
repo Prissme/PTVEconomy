@@ -93,27 +93,6 @@ async def on_ready():
     print(f"Connecté en tant que {bot.user}")
     await bot.tree.sync()  # sync slash commands
 
-@bot.event
-async def on_message(message):
-    # Ignorer les messages du bot lui-même
-    if message.author.bot:
-        return
-    
-    user_id = message.author.id
-    now = datetime.utcnow()
-
-    last_message_time = get_message_cooldown(user_id)
-
-    # Si cooldown actif et moins de 20 secondes depuis dernier message, ne rien faire
-    if last_message_time and (now - last_message_time) < timedelta(seconds=20):
-        pass
-    else:
-        update_balance(user_id, 1)  # +1 PrissBuck
-        set_message_cooldown(user_id)
-
-    # Pour que les commandes fonctionnent toujours !
-    await bot.process_commands(message)
-
 @bot.command(name="balance")
 async def balance(ctx):
     bal = get_balance(ctx.author.id)
@@ -184,5 +163,26 @@ async def give(interaction: discord.Interaction, member: discord.Member, amount:
     await interaction.response.send_message(
         f"{interaction.user.mention} a donné {net_amount} PrissBucks 💵 à {member.mention} (taxe {tax} PrissBucks vers le propriétaire)."
     )
+
+@bot.event
+async def on_message(message):
+    # Ignorer les messages du bot lui-même
+    if message.author.bot:
+        return
+    
+    user_id = message.author.id
+    now = datetime.utcnow()
+
+    last_message_time = get_message_cooldown(user_id)
+
+    # Si cooldown actif et moins de 20 secondes depuis dernier message, ne rien faire
+    if last_message_time and (now - last_message_time) < timedelta(seconds=20):
+        pass
+    else:
+        update_balance(user_id, 1)  # +1 PrissBuck
+        set_message_cooldown(user_id)
+
+    # Pour que les commandes fonctionnent toujours !
+    await bot.process_commands(message)
 
 bot.run(TOKEN)
