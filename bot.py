@@ -1,88 +1,61 @@
 import discord
 from discord.ext import commands
-from discord import app_commands
-import os
+from datetime import datetime, timezone
 import random
-from datetime import datetime, timedelta, timezone
+import os
 from dotenv import load_dotenv
-import db
-import logging
+import db  # ton fichier db.py
 
-# ---------------- CONFIG ----------------
-logging.basicConfig(level=logging.INFO)
 load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
-OWNER_ID = int(os.getenv("OWNER_ID", 0))
+OWNER_ID = int(os.getenv("OWNER_ID"))
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix="!", intents=intents)
+bot = commands.Bot(command_prefix='!', intents=intents)
 
-# ---------------- EVENTS ----------------
+database = db.Database(dsn=DATABASE_URL)
+
 @bot.event
 async def on_ready():
-    await db.init_database()
-    await bot.tree.sync()
-    logging.info(f"✅ Connecté en tant que {bot.user}")
+    print(f"✅ Connecté en tant que {bot.user}")
+    await database.connect()
 
-# ---------------- !balance ----------------
-@bot.command(name="balance", help="Affiche ton solde.")
-async def balance_cmd(ctx, member: discord.Member = None):
-    user = member or ctx.author
-    balance = await db.get_balance(user.id)
-    await ctx.send(f"💰 **{user.display_name}** possède **{balance:,} PB**")
+@bot.command(name='balance')
+async def balance_cmd(ctx):
+    user_id = ctx.author.id
+    bal = await database.get_balance(user_id)
+    await ctx.send(f"{ctx.author.mention}, ton solde est de {bal} pièces.")
 
-# ---------------- /give ----------------
-@bot.tree.command(name="give", description="Donne des PrissBucks à un autre joueur.")
-@app_commands.describe(member="Le joueur à qui donner", amount="Montant à donner")
-async def give_cmd(interaction: discord.Interaction, member: discord.Member, amount: int):
-    sender_id = interaction.user.id
+@bot.command(name='give')
+async def give_cmd(ctx, member: discord.Member, amount: int):
+    giver_id = ctx.author.id
     receiver_id = member.id
-
     if amount <= 0:
-        await interaction.response.send_message("⚠️ Montant invalide.", ephemeral=True)
+        await ctx.send("Le montant doit être positif.")
         return
+    success = await database.transfer(giver_id, receiver_id, amount)
+    if success:
+        await ctx.send(f"{ctx.author.mention} a donné {amount} pièces à {member.mention}.")
+    else:
+        await ctx.send("Tu n'as pas assez de pièces.")
 
-    if sender_id == receiver_id:
-        await interaction.response.send_message("⚠️ Tu ne peux pas te donner à toi-même.", ephemeral=True)
-        return
+@bot.command(name='dailyspin')
+async def dailyspin_cmd(ctx):
+    user_id = ctx.author.id
+    now = datetime.now(timezone.utc)  # datetime aware UTC
 
-    sender_balance = await db.get_balance(sender_id)
-    if sender_balance < amount:
-        await interaction.response.send_message("❌ Pas assez de PrissBucks.", ephemeral=True)
-        return
+    last_daily = await database.get_last_daily(user_id)
+    if last_daily:
+        delta = now - last_daily
+        if delta.total_seconds() < 86400:
+            await ctx.send("Tu as déjà fait ton spin quotidien aujourd'hui. Réessaie plus tard !")
+            return
 
-    await db.update_balance(sender_id, -amount)
-    await db.update_balance(receiver_id, amount)
+    reward = random.randint(10, 100)
+    await database.update_balance(user_id, reward)
+    await database.set_last_daily(user_id, now)
+    await ctx.send(f"🎉 {ctx.author.mention}, tu as gagné {reward} pièces avec ton spin quotidien !")
 
-    await interaction.response.send_message(
-        f"💸 {interaction.user.mention} a donné **{amount:,} PB** à {member.mention} !"
-    )
-
-# ---------------- /dailyspin ----------------
-@bot.tree.command(name="dailyspin", description="Tourne la roue pour gagner des PrissBucks (1 fois par 24h).")
-async def dailyspin_cmd(interaction: discord.Interaction):
-    user_id = interaction.user.id
-    now = datetime.now(timezone.utc)
-
-    last_claim = await db.get_last_daily(user_id)
-    if last_claim and now - last_claim < timedelta(hours=24):
-        hours_left = 24 - (now - last_claim).seconds // 3600
-        await interaction.response.send_message(
-            f"⏳ Tu dois attendre encore **{hours_left}h** avant de rejouer.",
-            ephemeral=True
-        )
-        return
-
-    reward = random.randint(100, 1000)
-    await db.update_balance(user_id, reward)
-    await db.set_last_daily(user_id, now)
-
-    await interaction.response.send_message(
-        f"🎰 **Daily Spin** : Tu as gagné **{reward:,} PB** ! 🎉"
-    )
-
-# ---------------- RUN ----------------
-if __name__ == "__main__":
-    bot.run(TOKEN)
+bot.run(TOKEN)
