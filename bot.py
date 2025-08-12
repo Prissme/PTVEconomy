@@ -84,7 +84,7 @@ async def balance_cmd(ctx, member: discord.Member = None):
         
         embed = discord.Embed(
             title="💰 Solde",
-            description=f"**{target.display_name}** possède **{balance:,}** pièces",
+            description=f"**{target.display_name}** possède **{balance:,}** PrissBucks",
             color=0x00ff00 if balance > 0 else 0xff9900
         )
         embed.set_thumbnail(url=target.display_avatar.url)
@@ -119,7 +119,7 @@ async def give_cmd(ctx, member: discord.Member, amount: int):
         # Vérifier le solde avant le transfert
         giver_balance = await database.get_balance(giver.id)
         if giver_balance < amount:
-            await ctx.send(f"❌ **Solde insuffisant !**\nTu as {giver_balance:,} pièces mais tu essayes de donner {amount:,} pièces.")
+            await ctx.send(f"❌ **Solde insuffisant !**\nTu as {giver_balance:,} PrissBucks mais tu essayes de donner {amount:,} PrissBucks.")
             return
 
         # Effectuer le transfert
