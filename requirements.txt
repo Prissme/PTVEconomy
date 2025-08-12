@@ -1,3 +1,11 @@
+# Discord Bot Dependencies
 discord.py==2.5.2
+
+# Database
 asyncpg==0.27.0
+
+# Environment Variables
 python-dotenv==1.0.0
+
+# Optional: Logging and monitoring
+colorlog==6.7.0
