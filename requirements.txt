@@ -7,5 +7,8 @@ asyncpg==0.27.0
 # Environment Variables
 python-dotenv==1.0.0
 
+# Health server pour Koyeb
+aiohttp==3.8.5
+
 # Optional: Logging and monitoring
 colorlog==6.7.0
