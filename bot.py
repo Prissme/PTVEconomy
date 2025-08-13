@@ -10,6 +10,14 @@ import math
 import json
 import db
 
+# Import du serveur de santé
+try:
+    from health_server import HealthServer
+    HEALTH_SERVER_AVAILABLE = True
+except ImportError:
+    HEALTH_SERVER_AVAILABLE = False
+    logging.warning("⚠️ health_server.py non trouvé, pas de health check")
+
 # Configuration du logging
 logging.basicConfig(
     level=logging.INFO,
@@ -420,21 +428,55 @@ async def inventory_cmd(ctx, member: discord.Member = None):
 
 @bot.command(name='additem')
 @commands.has_permissions(administrator=True)
-async def additem_cmd(ctx, price: int, role: discord.Role, *, name: str):
+async def additem_cmd(ctx, price: int, role_input: str, *, name: str):
     """[ADMIN] Ajoute un rôle au shop"""
     if price <= 0:
         await ctx.send("❌ **Le prix doit être positif !**")
         return
     
     try:
-        # Vérifier que le bot peut gérer ce rôle
-        if role >= ctx.guild.me.top_role:
-            await ctx.send("❌ **Je ne peux pas gérer ce rôle (hiérarchie) !**")
+        # Essayer de récupérer le rôle par ID ou mention
+        role = None
+        
+        # Si c'est un ID numérique
+        if role_input.isdigit():
+            role = ctx.guild.get_role(int(role_input))
+        # Si c'est une mention <@&ID>
+        elif role_input.startswith('<@&') and role_input.endswith('>'):
+            role_id = int(role_input[3:-1])
+            role = ctx.guild.get_role(role_id)
+        # Sinon essayer de trouver par nom
+        else:
+            role = discord.utils.get(ctx.guild.roles, name=role_input)
+        
+        if not role:
+            await ctx.send(f"❌ **Rôle introuvable !**\n"
+                          f"Utilisez l'une de ces méthodes :\n"
+                          f"• `!additem {price} @RôleNom {name}`\n"
+                          f"• `!additem {price} {role_input} {name}` (avec l'ID du rôle)\n"
+                          f"• `!additem {price} \"Nom exact du rôle\" {name}`")
             return
         
-        # Données du rôle
-        data = {"role_id": role.id}
-        description = f"Obtenez le rôle {role.mention} avec sa couleur exclusive !"
+        # Vérifier que le bot peut gérer ce rôle
+        if role >= ctx.guild.me.top_role:
+            await ctx.send("❌ **Je ne peux pas gérer ce rôle (hiérarchie) !**\n"
+                          f"Le rôle {role.mention} est plus haut que mon rôle dans la hiérarchie.")
+            return
+        
+        # Vérifier si ce rôle existe déjà dans le shop
+        existing_items = await database.get_shop_items(active_only=False)
+        for item in existing_items:
+            if item.get('data', {}).get('role_id') == role.id and item.get('is_active'):
+                await ctx.send(f"⚠️ **Ce rôle est déjà dans la boutique !**\n"
+                              f"Item existant : **{item['name']}** (ID: {item['id']}) - {item['price']:,} PrissBucks")
+                return
+        
+        # Créer une description personnalisée si pas fournie
+        description = f"🎭 Obtenez le rôle {role.mention} avec tous ses privilèges !"
+        if "PERM VOC" in name.upper():
+            description += "\n🎤 Inclut les permissions vocales spéciales !"
+        if "BOURGEOIS" in name.upper():
+            description += "\n💎 Statut de prestige sur le serveur !"
         
         # Ajouter à la base
         item_id = await database.add_shop_item(
@@ -442,7 +484,7 @@ async def additem_cmd(ctx, price: int, role: discord.Role, *, name: str):
             description=description,
             price=price,
             item_type="role",
-            data=data
+            data={"role_id": role.id}
         )
         
         embed = discord.Embed(
@@ -451,12 +493,16 @@ async def additem_cmd(ctx, price: int, role: discord.Role, *, name: str):
         )
         embed.add_field(name="📛 Nom", value=name, inline=True)
         embed.add_field(name="💰 Prix", value=f"{price:,} PrissBucks", inline=True)
-        embed.add_field(name="🎭 Rôle", value=role.mention, inline=True)
-        embed.add_field(name="🆔 ID", value=f"`{item_id}`", inline=True)
-        embed.set_footer(text="Les utilisateurs peuvent maintenant acheter cet item !")
+        embed.add_field(name="🎭 Rôle", value=f"{role.mention} (`{role.id}`)", inline=True)
+        embed.add_field(name="🆔 Item ID", value=f"`{item_id}`", inline=True)
+        embed.add_field(name="📝 Description", value=description, inline=False)
+        embed.set_footer(text="Les utilisateurs peuvent maintenant acheter cet item avec !buy " + str(item_id))
         
         await ctx.send(embed=embed)
+        logger.info(f"Item ajouté au shop: {name} (rôle {role.name}, prix {price})")
         
+    except ValueError as e:
+        await ctx.send("❌ **ID de rôle invalide !** Utilisez un nombre valide.")
     except Exception as e:
         logger.error(f"Erreur additem: {e}")
         await ctx.send("❌ **Erreur lors de l'ajout de l'item.**")
@@ -693,25 +739,87 @@ async def on_guild_remove(guild):
     """Événement quand le bot quitte un serveur"""
     logger.info(f"❌ Bot retiré du serveur: {guild.name} ({guild.id})")
 
-# ==================== DÉMARRAGE ====================
+# ==================== GESTION D'ERREURS GLOBALE ====================
+
+@bot.event
+async def on_error(event, *args, **kwargs):
+    """Gestion d'erreur globale pour éviter les crashs"""
+    import traceback
+    logger.error(f"Erreur dans l'événement {event}: {traceback.format_exc()}")
+
+# ==================== DÉMARRAGE AVEC RESTART AUTOMATIQUE ====================
 
 async def main():
-    """Fonction principale pour démarrer le bot"""
-    try:
-        async with bot:
-            await bot.start(TOKEN)
-    except KeyboardInterrupt:
-        logger.info("👋 Arrêt du bot demandé par l'utilisateur")
-    except Exception as e:
-        logger.error(f"💥 Erreur fatale: {e}")
-    finally:
-        if database.pool:
-            await database.close()
-            logger.info("🔌 Connexion à la base fermée")
+    """Fonction principale pour démarrer le bot avec gestion de reconnexion"""
+    max_retries = 5
+    retry_count = 0
+    
+    while retry_count < max_retries:
+        try:
+            logger.info(f"🚀 Tentative de connexion {retry_count + 1}/{max_retries}")
+            async with bot:
+                await bot.start(TOKEN)
+        except KeyboardInterrupt:
+            logger.info("👋 Arrêt du bot demandé par l'utilisateur")
+            break
+        except discord.ConnectionClosed:
+            logger.warning("🔌 Connexion fermée, tentative de reconnexion...")
+            retry_count += 1
+            await asyncio.sleep(5)
+        except discord.LoginFailure:
+            logger.error("❌ Token invalide, arrêt du bot")
+            break
+        except Exception as e:
+            logger.error(f"💥 Erreur fatale: {e}")
+            retry_count += 1
+            if retry_count < max_retries:
+                logger.info(f"⏳ Redémarrage dans 10 secondes...")
+                await asyncio.sleep(10)
+            else:
+                logger.error("❌ Nombre maximum de tentatives atteint")
+        finally:
+            if database.pool:
+                try:
+                    await database.close()
+                    logger.info("🔌 Connexion à la base fermée")
+                except:
+                    pass
 
 if __name__ == "__main__":
+    async def run_bot_with_health():
+        """Lance le bot avec le serveur de santé"""
+        tasks = []
+        
+        # Tâche principale du bot
+        bot_task = asyncio.create_task(main())
+        tasks.append(bot_task)
+        
+        # Serveur de santé si disponible
+        if HEALTH_SERVER_AVAILABLE:
+            health_server = HealthServer()
+            health_task = asyncio.create_task(health_server.run_forever())
+            tasks.append(health_task)
+        
+        try:
+            # Attendre que l'une des tâches se termine
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            
+            # Annuler les tâches restantes
+            for task in pending:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                    
+        except KeyboardInterrupt:
+            print("\n👋 Arrêt en cours...")
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+    
     try:
-        asyncio.run(main())
+        asyncio.run(run_bot_with_health())
     except KeyboardInterrupt:
         print("\n👋 Au revoir !")
     except Exception as e:
