@@ -172,6 +172,7 @@ class Database:
         if not self.pool:
             raise RuntimeError("Database not connected")
             
+        import json
         async with self.pool.acquire() as conn:
             query = """
                 SELECT id, name, description, price, type, data, is_active, created_at
@@ -182,32 +183,55 @@ class Database:
             query += " ORDER BY price ASC"
             
             rows = await conn.fetch(query)
-            return [dict(row) for row in rows]
+            items = []
+            for row in rows:
+                item = dict(row)
+                # Convertir le JSON string en dictionnaire Python
+                if item['data'] and isinstance(item['data'], str):
+                    try:
+                        item['data'] = json.loads(item['data'])
+                    except json.JSONDecodeError:
+                        item['data'] = {}
+                items.append(item)
+            return items
 
     async def get_shop_item(self, item_id: int) -> Optional[Dict]:
         """Récupère un item spécifique du shop"""
         if not self.pool:
             raise RuntimeError("Database not connected")
             
+        import json
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 SELECT id, name, description, price, type, data, is_active, created_at
                 FROM shop_items 
                 WHERE id = $1
             """, item_id)
-            return dict(row) if row else None
+            
+            if not row:
+                return None
+                
+            item = dict(row)
+            # Convertir le JSON string en dictionnaire Python
+            if item['data'] and isinstance(item['data'], str):
+                try:
+                    item['data'] = json.loads(item['data'])
+                except json.JSONDecodeError:
+                    item['data'] = {}
+            return item
 
     async def add_shop_item(self, name: str, description: str, price: int, item_type: str, data: Dict) -> int:
         """Ajoute un item au shop"""
         if not self.pool:
             raise RuntimeError("Database not connected")
             
+        import json
         async with self.pool.acquire() as conn:
             row = await conn.fetchrow("""
                 INSERT INTO shop_items (name, description, price, type, data)
                 VALUES ($1, $2, $3, $4, $5)
                 RETURNING id
-            """, name, description, price, item_type, data)
+            """, name, description, price, item_type, json.dumps(data))
             return row["id"]
 
     async def update_shop_item(self, item_id: int, **kwargs) -> bool:
@@ -252,17 +276,26 @@ class Database:
         if not self.pool:
             raise RuntimeError("Database not connected")
             
+        import json
         async with self.pool.acquire() as conn:
             async with conn.transaction():
                 # Vérifier que l'item existe et est actif
-                item = await conn.fetchrow("""
+                item_row = await conn.fetchrow("""
                     SELECT id, name, price, type, data 
                     FROM shop_items 
                     WHERE id = $1 AND is_active = TRUE
                 """, item_id)
                 
-                if not item:
+                if not item_row:
                     return False, "Item inexistant ou inactif"
+                
+                # Convertir les données en dictionnaire Python
+                item = dict(item_row)
+                if item['data'] and isinstance(item['data'], str):
+                    try:
+                        item['data'] = json.loads(item['data'])
+                    except json.JSONDecodeError:
+                        item['data'] = {}
                 
                 # Vérifier si l'utilisateur a déjà acheté cet item (pour les rôles)
                 if item["type"] == "role":
@@ -298,6 +331,7 @@ class Database:
         if not self.pool:
             raise RuntimeError("Database not connected")
             
+        import json
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("""
                 SELECT up.id, up.purchase_date, up.price_paid,
@@ -307,7 +341,18 @@ class Database:
                 WHERE up.user_id = $1
                 ORDER BY up.purchase_date DESC
             """, user_id)
-            return [dict(row) for row in rows]
+            
+            purchases = []
+            for row in rows:
+                purchase = dict(row)
+                # Convertir le JSON string en dictionnaire Python
+                if purchase['data'] and isinstance(purchase['data'], str):
+                    try:
+                        purchase['data'] = json.loads(purchase['data'])
+                    except json.JSONDecodeError:
+                        purchase['data'] = {}
+                purchases.append(purchase)
+            return purchases
 
     async def get_shop_stats(self) -> Dict:
         """Récupère les statistiques du shop"""
