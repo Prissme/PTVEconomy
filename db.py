@@ -1,6 +1,6 @@
 import asyncpg
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List, Dict, Tuple
 
 async def create_pool(dsn: str = None):
     """Crée un pool de connexions à la base de données"""
@@ -11,6 +11,7 @@ async def create_pool(dsn: str = None):
 async def init_db(pool):
     """Initialise les tables de la base de données"""
     async with pool.acquire() as conn:
+        # Table users existante
         await conn.execute('''
             CREATE TABLE IF NOT EXISTS users (
                 user_id BIGINT PRIMARY KEY,
@@ -18,7 +19,41 @@ async def init_db(pool):
                 last_daily TIMESTAMP WITH TIME ZONE
             )
         ''')
-        print("✅ Tables créées/vérifiées")
+        
+        # Nouvelle table pour les items du shop
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS shop_items (
+                id SERIAL PRIMARY KEY,
+                name VARCHAR(100) NOT NULL,
+                description TEXT,
+                price BIGINT NOT NULL,
+                type VARCHAR(50) NOT NULL,
+                data JSON,
+                is_active BOOLEAN DEFAULT TRUE,
+                created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+            )
+        ''')
+        
+        # Nouvelle table pour les achats des utilisateurs
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_purchases (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT NOT NULL,
+                item_id INTEGER REFERENCES shop_items(id),
+                purchase_date TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                price_paid BIGINT NOT NULL
+            )
+        ''')
+        
+        # Index pour optimiser les requêtes
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_user_purchases_user_id ON user_purchases(user_id)
+        ''')
+        await conn.execute('''
+            CREATE INDEX IF NOT EXISTS idx_user_purchases_item_id ON user_purchases(item_id)
+        ''')
+        
+        print("✅ Tables créées/vérifiées (avec système shop)")
 
 class Database:
     def __init__(self, dsn: str):
@@ -34,6 +69,8 @@ class Database:
         """Ferme le pool de connexions"""
         if self.pool:
             await self.pool.close()
+
+    # ==================== MÉTHODES ÉCONOMIE EXISTANTES ====================
 
     async def get_balance(self, user_id: int) -> int:
         """Récupère le solde d'un utilisateur"""
@@ -127,3 +164,179 @@ class Database:
                 LIMIT $1
             """, limit)
             return [(row["user_id"], row["balance"]) for row in rows]
+
+    # ==================== NOUVELLES MÉTHODES SHOP ====================
+
+    async def get_shop_items(self, active_only: bool = True) -> List[Dict]:
+        """Récupère la liste des items du shop"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        async with self.pool.acquire() as conn:
+            query = """
+                SELECT id, name, description, price, type, data, is_active, created_at
+                FROM shop_items
+            """
+            if active_only:
+                query += " WHERE is_active = TRUE"
+            query += " ORDER BY price ASC"
+            
+            rows = await conn.fetch(query)
+            return [dict(row) for row in rows]
+
+    async def get_shop_item(self, item_id: int) -> Optional[Dict]:
+        """Récupère un item spécifique du shop"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT id, name, description, price, type, data, is_active, created_at
+                FROM shop_items 
+                WHERE id = $1
+            """, item_id)
+            return dict(row) if row else None
+
+    async def add_shop_item(self, name: str, description: str, price: int, item_type: str, data: Dict) -> int:
+        """Ajoute un item au shop"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                INSERT INTO shop_items (name, description, price, type, data)
+                VALUES ($1, $2, $3, $4, $5)
+                RETURNING id
+            """, name, description, price, item_type, data)
+            return row["id"]
+
+    async def update_shop_item(self, item_id: int, **kwargs) -> bool:
+        """Met à jour un item du shop"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        if not kwargs:
+            return False
+            
+        # Construire la requête dynamiquement
+        set_clause = ", ".join([f"{key} = ${i+2}" for i, key in enumerate(kwargs.keys())])
+        values = [item_id] + list(kwargs.values())
+        
+        async with self.pool.acquire() as conn:
+            result = await conn.execute(f"""
+                UPDATE shop_items 
+                SET {set_clause} 
+                WHERE id = $1
+            """, *values)
+            return result != "UPDATE 0"
+
+    async def deactivate_shop_item(self, item_id: int) -> bool:
+        """Désactive un item du shop"""
+        return await self.update_shop_item(item_id, is_active=False)
+
+    async def has_purchased_item(self, user_id: int, item_id: int) -> bool:
+        """Vérifie si un utilisateur a déjà acheté un item"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("""
+                SELECT 1 FROM user_purchases 
+                WHERE user_id = $1 AND item_id = $2
+                LIMIT 1
+            """, user_id, item_id)
+            return row is not None
+
+    async def purchase_item(self, user_id: int, item_id: int) -> Tuple[bool, str]:
+        """Effectue l'achat d'un item (transaction atomique)"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        async with self.pool.acquire() as conn:
+            async with conn.transaction():
+                # Vérifier que l'item existe et est actif
+                item = await conn.fetchrow("""
+                    SELECT id, name, price, type, data 
+                    FROM shop_items 
+                    WHERE id = $1 AND is_active = TRUE
+                """, item_id)
+                
+                if not item:
+                    return False, "Item inexistant ou inactif"
+                
+                # Vérifier si l'utilisateur a déjà acheté cet item (pour les rôles)
+                if item["type"] == "role":
+                    existing = await conn.fetchrow("""
+                        SELECT 1 FROM user_purchases 
+                        WHERE user_id = $1 AND item_id = $2
+                    """, user_id, item_id)
+                    if existing:
+                        return False, "Tu possèdes déjà cet item"
+                
+                # Vérifier le solde de l'utilisateur
+                user_balance = await conn.fetchrow("SELECT balance FROM users WHERE user_id = $1", user_id)
+                current_balance = user_balance["balance"] if user_balance else 0
+                
+                if current_balance < item["price"]:
+                    return False, f"Solde insuffisant (tu as {current_balance:,}, il faut {item['price']:,})"
+                
+                # Débiter le compte
+                await conn.execute("""
+                    UPDATE users SET balance = balance - $1 WHERE user_id = $2
+                """, item["price"], user_id)
+                
+                # Enregistrer l'achat
+                await conn.execute("""
+                    INSERT INTO user_purchases (user_id, item_id, price_paid)
+                    VALUES ($1, $2, $3)
+                """, user_id, item_id, item["price"])
+                
+                return True, f"Achat de '{item['name']}' réussi !"
+
+    async def get_user_purchases(self, user_id: int) -> List[Dict]:
+        """Récupère la liste des achats d'un utilisateur"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("""
+                SELECT up.id, up.purchase_date, up.price_paid,
+                       si.name, si.description, si.type, si.data
+                FROM user_purchases up
+                JOIN shop_items si ON up.item_id = si.id
+                WHERE up.user_id = $1
+                ORDER BY up.purchase_date DESC
+            """, user_id)
+            return [dict(row) for row in rows]
+
+    async def get_shop_stats(self) -> Dict:
+        """Récupère les statistiques du shop"""
+        if not self.pool:
+            raise RuntimeError("Database not connected")
+            
+        async with self.pool.acquire() as conn:
+            # Statistiques générales
+            stats = await conn.fetchrow("""
+                SELECT 
+                    COUNT(DISTINCT up.user_id) as unique_buyers,
+                    COUNT(up.id) as total_purchases,
+                    COALESCE(SUM(up.price_paid), 0) as total_revenue
+                FROM user_purchases up
+            """)
+            
+            # Top des items les plus vendus
+            top_items = await conn.fetch("""
+                SELECT si.name, COUNT(up.id) as purchases, SUM(up.price_paid) as revenue
+                FROM user_purchases up
+                JOIN shop_items si ON up.item_id = si.id
+                GROUP BY si.id, si.name
+                ORDER BY purchases DESC
+                LIMIT 5
+            """)
+            
+            return {
+                "unique_buyers": stats["unique_buyers"],
+                "total_purchases": stats["total_purchases"],
+                "total_revenue": stats["total_revenue"],
+                "top_items": [dict(row) for row in top_items]
+            }
